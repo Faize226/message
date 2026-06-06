@@ -49,6 +49,21 @@ function replyRefFromMessage(msg: Message): ReplyRef {
   }
 }
 
+/**
+ * Merge incoming messages (from API) into current state.
+ * - Adds new ids
+ * - Replaces existing with newer (incoming) version — picks up edits
+ * - Removes ids that no longer exist (e.g. deleted on the other side)
+ */
+function mergeMessages(prev: Message[], incoming: Message[]): Message[] {
+  const incomingIds = new Set(incoming.map((m) => m.id))
+  const incomingById = new Map(incoming.map((m) => [m.id, m]))
+  const kept = prev.filter((m) => incomingById.has(m.id)).map((m) => incomingById.get(m.id)!)
+  const prevIds = new Set(prev.map((m) => m.id))
+  const additions = incoming.filter((m) => !prevIds.has(m.id))
+  return [...kept, ...additions]
+}
+
 export default function ChatClient({ currentUserId, otherUser, initialMessages }: ChatClientProps) {
   const [messages, setMessages] = useState<Message[]>(initialMessages)
   const [replyTarget, setReplyTarget] = useState<ReplyRef | null>(null)
@@ -83,6 +98,32 @@ export default function ChatClient({ currentUserId, otherUser, initialMessages }
       }
     })
     return unsubscribe
+  }, [])
+
+  // Polling de secours : si Supabase Realtime est cassé (URL malformée,
+  // table pas activée, etc.), on refetch toutes les 5s pour ne pas avoir
+  // à refresh manuellement. Le realtime reste la voie principale.
+  useEffect(() => {
+    let cancelled = false
+    const POLL_MS = 5000
+
+    async function poll() {
+      try {
+        const res = await fetch('/api/messages', { cache: 'no-store' })
+        if (!res.ok) return
+        const data = await res.json()
+        if (cancelled || !Array.isArray(data.messages)) return
+        setMessages((prev) => mergeMessages(prev, data.messages))
+      } catch {
+        // silencieux : le prochain poll retentera
+      }
+    }
+
+    const id = setInterval(poll, POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
   }, [])
 
   useEffect(() => {
