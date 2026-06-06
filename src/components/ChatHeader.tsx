@@ -2,7 +2,7 @@
 
 import { signOut } from 'next-auth/react'
 import { useEffect, useState } from 'react'
-import { getSocket } from '@/lib/socket-client'
+import { trackPresence, type PresenceMap } from '@/lib/realtime'
 import { LogOut } from 'lucide-react'
 
 interface ChatHeaderProps {
@@ -15,29 +15,11 @@ export default function ChatHeader({ otherUserName, otherUserId, currentUserId }
   const [isOnline, setIsOnline] = useState(false)
 
   useEffect(() => {
-    const socket = getSocket(currentUserId)
-
-    const onCurrentOnline = (users: string[]) => {
-      setIsOnline(users.includes(otherUserId))
+    const onSync = (state: PresenceMap) => {
+      setIsOnline(Object.keys(state).some((key) => key === otherUserId))
     }
-    const onOnline = (userId: string) => {
-      if (userId === otherUserId) setIsOnline(true)
-    }
-    const onOffline = (userId: string) => {
-      if (userId === otherUserId) setIsOnline(false)
-    }
-
-    socket.on('currentOnlineUsers', onCurrentOnline)
-    socket.on('userOnline', onOnline)
-    socket.on('userOffline', onOffline)
-
-    socket.emit('getOnlineUsers')
-
-    return () => {
-      socket.off('currentOnlineUsers', onCurrentOnline)
-      socket.off('userOnline', onOnline)
-      socket.off('userOffline', onOffline)
-    }
+    const unsubscribe = trackPresence(currentUserId, onSync)
+    return unsubscribe
   }, [otherUserId, currentUserId])
 
   return (

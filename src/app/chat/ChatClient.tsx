@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { getSocket } from '@/lib/socket-client'
+import { subscribeToMessages, type MessageChangePayload } from '@/lib/realtime'
 import ChatHeader from '@/components/ChatHeader'
 import MessageList from '@/components/MessageList'
 import MessageInput, { SendData } from '@/components/MessageInput'
@@ -40,88 +40,84 @@ interface ChatClientProps {
   initialMessages: Message[]
 }
 
+function replyRefFromMessage(msg: Message): ReplyRef {
+  return {
+    id: msg.id,
+    content: msg.content,
+    type: msg.type,
+    user: { name: msg.user.name, username: msg.user.username },
+  }
+}
+
 export default function ChatClient({ currentUserId, otherUser, initialMessages }: ChatClientProps) {
   const [messages, setMessages] = useState<Message[]>(initialMessages)
   const [replyTarget, setReplyTarget] = useState<ReplyRef | null>(null)
   const [editingMessage, setEditingMessage] = useState<(ReplyRef & { content: string }) | null>(null)
 
   useEffect(() => {
-    let cancelled = false
-
-    async function refetchMessages() {
-      try {
-        const res = await fetch('/api/messages', { cache: 'no-store' })
-        if (!res.ok) {
-          console.error('[client] refetch failed:', res.status)
-          return
+    const unsubscribe = subscribeToMessages(async (payload: MessageChangePayload) => {
+      if (payload.eventType === 'INSERT') {
+        const newId = (payload.new as { id: string }).id
+        if (!newId) return
+        try {
+          const res = await fetch(`/api/messages/${newId}`, { cache: 'no-store' })
+          if (!res.ok) return
+          const full: Message = await res.json()
+          setMessages((prev) => (prev.some((m) => m.id === full.id) ? prev : [...prev, full]))
+        } catch (err) {
+          console.error('[client] fetch new message failed:', err)
         }
-        const data = await res.json()
-        if (!cancelled && Array.isArray(data.messages)) {
-          setMessages(data.messages)
-        }
-      } catch (err) {
-        if (!cancelled) console.error('[client] refetch error:', err)
+      } else if (payload.eventType === 'UPDATE') {
+        const updated = payload.new as { id: string; content: string | null; editedAt: string | null }
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === updated.id
+              ? { ...m, content: updated.content, editedAt: updated.editedAt }
+              : m
+          )
+        )
+      } else if (payload.eventType === 'DELETE') {
+        const oldId = (payload.old as { id: string }).id
+        if (!oldId) return
+        setMessages((prev) => prev.filter((m) => m.id !== oldId))
       }
-    }
-
-    const socket = getSocket(currentUserId)
-
-    const onNew = (message: Message) => {
-      setMessages((prev) => [...prev, message])
-    }
-    const onDeleted = ({ id }: { id: string }) => {
-      console.log('[client] messageDeleted received:', id)
-      setMessages((prev) => prev.filter((m) => m.id !== id))
-    }
-    const onEdited = ({ id, content, editedAt }: { id: string; content: string | null; editedAt: string }) => {
-      setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, content, editedAt } : m)))
-    }
-    const onConnect = () => {
-      // Le socket vient de (re)connecter : on rattrape les events manqués
-      // (Socket.io ne rejoue pas les events émis pendant la déconnexion).
-      refetchMessages()
-    }
-    const onVisibility = () => {
-      // L'utilisateur revient sur l'onglet : on resynchronise avec le serveur.
-      if (document.visibilityState === 'visible') {
-        refetchMessages()
-      }
-    }
-
-    socket.on('newMessage', onNew)
-    socket.on('messageDeleted', onDeleted)
-    socket.on('messageEdited', onEdited)
-    socket.on('connect', onConnect)
-    document.addEventListener('visibilitychange', onVisibility)
-
-    return () => {
-      cancelled = true
-      socket.off('newMessage', onNew)
-      socket.off('messageDeleted', onDeleted)
-      socket.off('messageEdited', onEdited)
-      socket.off('connect', onConnect)
-      document.removeEventListener('visibilitychange', onVisibility)
-    }
-  }, [currentUserId])
+    })
+    return unsubscribe
+  }, [])
 
   useEffect(() => {
     registerServiceWorker()
   }, [])
 
-  function handleSend(data: SendData, replyToId: string | null) {
-    getSocket(currentUserId).emit('sendMessage', { ...data, userId: currentUserId, replyToId })
-    setReplyTarget(null)
+  async function handleSend(data: SendData, replyToId: string | null) {
+    try {
+      const res = await fetch('/api/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: data.type,
+          content: data.content,
+          url: data.url,
+          duration: data.duration,
+          replyToId,
+        }),
+      })
+      if (!res.ok) {
+        console.error('[client] send failed:', res.status, await res.text())
+        return
+      }
+      const message: Message = await res.json()
+      setMessages((prev) => (prev.some((m) => m.id === message.id) ? prev : [...prev, message]))
+      setReplyTarget(null)
+    } catch (err) {
+      console.error('[client] send error:', err)
+    }
   }
 
   function handleReply(messageId: string) {
     const target = messages.find((m) => m.id === messageId)
     if (!target) return
-    setReplyTarget({
-      id: target.id,
-      content: target.content,
-      type: target.type,
-      user: target.user,
-    })
+    setReplyTarget(replyRefFromMessage(target))
     setEditingMessage(null)
   }
 
@@ -132,7 +128,7 @@ export default function ChatClient({ currentUserId, otherUser, initialMessages }
       id: target.id,
       content: target.content ?? '',
       type: target.type,
-      user: target.user,
+      user: { name: target.user.name, username: target.user.username },
     })
     setReplyTarget(null)
   }
@@ -156,7 +152,9 @@ export default function ChatClient({ currentUserId, otherUser, initialMessages }
       }
       const updated = await res.json()
       setMessages((prev) =>
-        prev.map((m) => (m.id === updated.id ? { ...m, content: updated.content, editedAt: updated.editedAt } : m))
+        prev.map((m) =>
+          m.id === updated.id ? { ...m, content: updated.content, editedAt: updated.editedAt } : m
+        )
       )
       setEditingMessage(null)
     } catch (err) {
@@ -176,8 +174,6 @@ export default function ChatClient({ currentUserId, otherUser, initialMessages }
     try {
       const res = await fetch(`/api/messages/${messageId}`, { method: 'DELETE' })
       if (res.status === 404) {
-        // Le message a déjà été supprimé (par l'autre utilisateur via socket,
-        // ou par un précédent onglet). On retire silencieusement de l'état local.
         setMessages((prev) => prev.filter((m) => m.id !== messageId))
         return
       }

@@ -6,10 +6,10 @@
     "seed": "tsx prisma/seed.ts"
   },
   "scripts": {
-    "dev": "tsx watch server.ts",
+    "dev": "next dev",
     "postinstall": "prisma generate",
     "build": "next build",
-    "start": "NODE_ENV=production node --import tsx server.ts",
+    "start": "next start",
     "lint": "eslint",
     "prisma:generate": "prisma generate",
     "prisma:push": "prisma db push",
@@ -27,8 +27,6 @@
     "prisma": "^6.19.3",
     "react": "19.2.4",
     "react-dom": "19.2.4",
-    "socket.io": "^4.8.3",
-    "socket.io-client": "^4.8.3",
     "tailwind-merge": "^3.6.0",
     "web-push": "^3.6.7"
   },

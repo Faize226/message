@@ -2,7 +2,58 @@ import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
 import { supabase } from '@/lib/supabase'
-import { getIO } from '@/lib/socket'
+
+export async function GET(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const session = await auth()
+  if (!session?.user?.id || !session.user.name) {
+    return NextResponse.json({ error: 'Non autorisé' }, { status: 401 })
+  }
+
+  const { id } = await params
+
+  const m = await prisma.message.findUnique({
+    where: { id },
+    include: {
+      user: { select: { id: true, name: true, username: true } },
+      replyTo: {
+        select: {
+          id: true,
+          content: true,
+          type: true,
+          user: { select: { name: true, username: true } },
+        },
+      },
+    },
+  })
+
+  if (!m) return NextResponse.json({ error: 'Message introuvable' }, { status: 404 })
+
+  return NextResponse.json({
+    id: m.id,
+    content: m.content,
+    type: m.type,
+    url: m.url,
+    duration: m.duration,
+    userId: m.userId,
+    createdAt: m.createdAt.toISOString(),
+    editedAt: m.editedAt ? m.editedAt.toISOString() : null,
+    replyTo: m.replyTo
+      ? {
+          id: m.replyTo.id,
+          content: m.replyTo.content,
+          type: m.replyTo.type,
+          user: {
+            name: m.replyTo.user.name,
+            username: m.replyTo.user.username,
+          },
+        }
+      : null,
+    user: { id: m.user.id, name: m.user.name, username: m.user.username },
+  })
+}
 
 export async function DELETE(
   req: NextRequest,
@@ -50,15 +101,6 @@ export async function DELETE(
   }
 
   await prisma.message.delete({ where: { id } })
-
-  // Broadcast deletion to all connected clients in real-time
-  const io = getIO()
-  if (!io) {
-    console.error('[api/messages] delete: io is null, broadcast skipped for id:', id)
-  } else {
-    io.to('room:global').emit('messageDeleted', { id })
-    console.log('[api/messages] delete broadcast sent for id:', id)
-  }
 
   return NextResponse.json({ success: true, id })
 }
@@ -117,18 +159,6 @@ export async function PATCH(
     data: { content, editedAt },
     include: { user: { select: { id: true, name: true, username: true } } },
   })
-
-  const io = getIO()
-  if (io) {
-    io.to('room:global').emit('messageEdited', {
-      id: updated.id,
-      content: updated.content,
-      editedAt: editedAt.toISOString(),
-    })
-    console.log('[api/messages] edit broadcast sent for id:', id)
-  } else {
-    console.error('[api/messages] edit: io is null, broadcast skipped for id:', id)
-  }
 
   return NextResponse.json({
     id: updated.id,
